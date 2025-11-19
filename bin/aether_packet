@@ -1,0 +1,597 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../lib/aether_packet'
+require 'optparse'
+require 'yaml'
+
+module AetherPacket
+  # CLICommand represents a single CLI command with options and execution
+  class CLICommand
+    attr_reader :name, :description, :options, :handler
+
+    def initialize(name, description, &handler)
+      @name = name
+      @description = description
+      @options = {}
+      @handler = handler
+    end
+
+    # Add option to command
+    def add_option(short, long, description, type: String, default: nil)
+      @options[long.gsub('--', '')] = {
+        short: short,
+        long: long,
+        description: description,
+        type: type,
+        default: default
+      }
+    end
+
+    # Execute command with parsed options
+    def execute(args = [])
+      parsed_options = parse_options(args)
+      @handler.call(parsed_options)
+    end
+
+    private
+
+    def parse_options(args)
+      options = {}
+      @options.each { |key, opt| options[key] = opt[:default] }
+      
+      parser = OptionParser.new do |opts|
+        @options.each do |key, opt|
+          opts.on(opt[:short], opt[:long], opt[:description]) do |value|
+            options[key] = opt[:type] == Integer ? value.to_i : value
+          end
+        end
+      end
+      
+      parser.parse!(args)
+      options
+    end
+  end
+
+  # AetherPacketCLI provides command-line interface for the network appliance
+  class AetherPacketCLI
+    attr_reader :commands, :appliance, :config
+
+    def initialize
+      @commands = {}
+      @appliance = nil
+      @config = {}
+      setup_commands
+    end
+
+    # Run CLI with command line arguments
+    def run(args = ARGV)
+      if args.empty? || %w[-h --help help].include?(args.first)
+        show_help
+        return
+      end
+      
+      command_name = args.shift
+      command = @commands[command_name]
+      
+      if command
+        begin
+          command.execute(args)
+        rescue => e
+          puts "Error executing command '#{command_name}': #{e.message}"
+          puts e.backtrace.first(3).join("\n") if ENV['DEBUG']
+        end
+      else
+        puts "Unknown command: #{command_name}"
+        puts "Run 'aether_packet help' for available commands."
+      end
+    end
+
+    private
+
+    def setup_commands
+      # Start command
+      add_command('start', 'Start the network appliance') do |options|
+        start_appliance(options)
+      end.tap do |cmd|
+        cmd.add_option('-c', '--config FILE', 'Configuration file path')
+        cmd.add_option('-i', '--interface IFACE', 'Network interface to use')
+        cmd.add_option('-d', '--daemon', 'Run as daemon')
+        cmd.add_option('-p', '--port PORT', 'Dashboard port', type: Integer, default: 8080)
+      end
+
+      # Stop command
+      add_command('stop', 'Stop the running appliance') do |options|
+        stop_appliance(options)
+      end
+
+      # Status command  
+      add_command('status', 'Show appliance status') do |options|
+        show_status(options)
+      end.tap do |cmd|
+        cmd.add_option('-v', '--verbose', 'Show detailed status')
+        cmd.add_option('-j', '--json', 'Output in JSON format')
+      end
+
+      # Firewall commands
+      add_command('firewall', 'Manage firewall rules') do |options|
+        manage_firewall(options)
+      end.tap do |cmd|
+        cmd.add_option('-l', '--list', 'List firewall rules')
+        cmd.add_option('-a', '--add RULE', 'Add firewall rule')
+        cmd.add_option('-r', '--remove ID', 'Remove firewall rule by ID')
+        cmd.add_option('-e', '--enable', 'Enable firewall')
+        cmd.add_option('-d', '--disable', 'Disable firewall')
+      end
+
+      # Metrics command
+      add_command('metrics', 'Show network metrics') do |options|
+        show_metrics(options)
+      end.tap do |cmd|
+        cmd.add_option('-t', '--top', 'Show top metrics')
+        cmd.add_option('-r', '--realtime', 'Show real-time metrics')
+        cmd.add_option('-w', '--window SECONDS', 'Time window for rates', type: Integer, default: 60)
+      end
+
+      # Security commands
+      add_command('security', 'Security status and controls') do |options|
+        manage_security(options)
+      end.tap do |cmd|
+        cmd.add_option('-s', '--status', 'Show security status')
+        cmd.add_option('-a', '--alerts', 'Show recent security alerts')
+        cmd.add_option('-b', '--blocked', 'Show blocked IPs/domains')
+      end
+
+      # Config commands
+      add_command('config', 'Configuration management') do |options|
+        manage_config(options)
+      end.tap do |cmd|
+        cmd.add_option('-s', '--show', 'Show current configuration')
+        cmd.add_option('-f', '--file FILE', 'Load configuration file')
+        cmd.add_option('-g', '--generate', 'Generate sample configuration')
+      end
+
+      # Dashboard command
+      add_command('dashboard', 'Manage web dashboard') do |options|
+        manage_dashboard(options)
+      end.tap do |cmd|
+        cmd.add_option('-s', '--start', 'Start dashboard server')
+        cmd.add_option('-t', '--stop', 'Stop dashboard server')
+        cmd.add_option('-u', '--url', 'Show dashboard URL')
+        cmd.add_option('-p', '--port PORT', 'Dashboard port', type: Integer, default: 8080)
+      end
+
+      # Test command
+      add_command('test', 'Run network tests') do |options|
+        run_tests(options)
+      end.tap do |cmd|
+        cmd.add_option('-p', '--ping HOST', 'Test connectivity to host')
+        cmd.add_option('-s', '--speed', 'Run speed test')
+        cmd.add_option('-c', '--capture COUNT', 'Capture packets', type: Integer, default: 10)
+      end
+
+      # Version command
+      add_command('version', 'Show version information') do |options|
+        show_version(options)
+      end
+    end
+
+    def add_command(name, description, &handler)
+      command = CLICommand.new(name, description, &handler)
+      @commands[name] = command
+      command
+    end
+
+    def show_help
+      puts <<~HELP
+        AetherPacket - Enterprise-grade userspace network appliance
+        
+        Usage: aether_packet <command> [options]
+        
+        Commands:
+      HELP
+      
+      @commands.each do |name, command|
+        puts "  %-12s %s" % [name, command.description]
+      end
+      
+      puts "\nUse 'aether_packet <command> --help' for command-specific options."
+    end
+
+    # Command implementations
+    def start_appliance(options)
+      puts "Starting AetherPacket appliance..."
+      
+      # Load configuration
+      if options['config']
+        load_config_file(options['config'])
+      end
+      
+      # Initialize appliance
+      @appliance = NetworkAppliance.new
+      
+      # Configure interface if specified
+      if options['interface']
+        puts "Configuring interface: #{options['interface']}"
+        # Would configure the specified interface
+      end
+      
+      # Start components
+      puts "Starting network components..."
+      @appliance.start! if @appliance.respond_to?(:start!)
+      
+      # Start dashboard if enabled
+      if options['port']
+        puts "Starting dashboard on port #{options['port']}..."
+        start_dashboard(options['port'])
+      end
+      
+      if options['daemon']
+        puts "Running as daemon..."
+        daemonize
+      else
+        puts "AetherPacket appliance started successfully!"
+        puts "Press Ctrl+C to stop..."
+        
+        # Wait for interrupt
+        begin
+          sleep
+        rescue Interrupt
+          puts "\nShutting down..."
+          stop_appliance({})
+        end
+      end
+    end
+
+    def stop_appliance(options)
+      if @appliance
+        puts "Stopping AetherPacket appliance..."
+        @appliance.stop! if @appliance.respond_to?(:stop!)
+        @appliance = nil
+        puts "Appliance stopped."
+      else
+        puts "No running appliance found."
+      end
+    end
+
+    def show_status(options)
+      if @appliance.nil?
+        puts "AetherPacket appliance is not running."
+        return
+      end
+      
+      status = {
+        running: @appliance.respond_to?(:running?) ? @appliance.running? : false,
+        components: get_component_status,
+        interfaces: get_interface_status,
+        security: get_security_status,
+        metrics: get_metrics_summary
+      }
+      
+      if options['json']
+        puts JSON.pretty_generate(status)
+      else
+        display_status(status, options['verbose'])
+      end
+    end
+
+    def manage_firewall(options)
+      return puts "Appliance not running" unless @appliance
+      return puts "Firewall not available" unless @appliance.respond_to?(:firewall)
+      
+      firewall = @appliance.firewall
+      
+      if options['list']
+        rules = firewall.export_rules
+        display_firewall_rules(rules)
+      elsif options['add']
+        # Parse and add rule
+        puts "Adding firewall rule: #{options['add']}"
+        # Would parse and add the rule
+      elsif options['remove']
+        puts "Removing firewall rule: #{options['remove']}"
+        # Would remove the rule
+      elsif options['enable']
+        firewall.enabled = true
+        puts "Firewall enabled"
+      elsif options['disable']
+        firewall.enabled = false
+        puts "Firewall disabled"
+      else
+        # Show firewall status
+        stats = firewall.firewall_stats
+        display_firewall_status(stats)
+      end
+    end
+
+    def show_metrics(options)
+      return puts "Appliance not running" unless @appliance
+      return puts "Metrics not available" unless @appliance.respond_to?(:metrics)
+      
+      metrics = @appliance.metrics
+      
+      if options['realtime']
+        show_realtime_metrics(metrics, options['window'])
+      elsif options['top']
+        show_top_metrics(metrics)
+      else
+        show_metrics_summary(metrics)
+      end
+    end
+
+    def manage_security(options)
+      return puts "Appliance not running" unless @appliance
+      
+      if options['status']
+        show_security_status
+      elsif options['alerts']
+        show_security_alerts
+      elsif options['blocked']
+        show_blocked_entities
+      else
+        show_security_overview
+      end
+    end
+
+    def manage_config(options)
+      if options['show']
+        puts JSON.pretty_generate(@config)
+      elsif options['file']
+        load_config_file(options['file'])
+        puts "Configuration loaded from #{options['file']}"
+      elsif options['generate']
+        generate_sample_config
+      else
+        puts "Current configuration keys: #{@config.keys.join(', ')}"
+      end
+    end
+
+    def manage_dashboard(options)
+      if options['start']
+        port = options['port'] || 8080
+        start_dashboard(port)
+      elsif options['stop']
+        stop_dashboard
+      elsif options['url']
+        show_dashboard_url
+      else
+        show_dashboard_status
+      end
+    end
+
+    def run_tests(options)
+      if options['ping']
+        run_ping_test(options['ping'])
+      elsif options['speed']
+        run_speed_test
+      elsif options['capture']
+        run_packet_capture(options['capture'])
+      else
+        run_basic_tests
+      end
+    end
+
+    def show_version(options)
+      puts "AetherPacket v#{AetherPacket::VERSION}"
+      puts "Enterprise-grade userspace network appliance"
+      puts "Built with Ruby #{RUBY_VERSION}"
+    end
+
+    # Helper methods
+    def load_config_file(file_path)
+      if File.exist?(file_path)
+        @config = YAML.load_file(file_path)
+      else
+        puts "Configuration file not found: #{file_path}"
+      end
+    end
+
+    def get_component_status
+      return {} unless @appliance
+      
+      components = {}
+      components[:firewall] = @appliance.respond_to?(:firewall)
+      components[:nat_engine] = @appliance.respond_to?(:nat_engine)
+      components[:ids_controller] = @appliance.respond_to?(:ids_controller)
+      components[:dns_sinkhole] = @appliance.respond_to?(:dns_sinkhole)
+      components[:traffic_shaper] = @appliance.respond_to?(:traffic_shaper)
+      components[:metrics] = @appliance.respond_to?(:metrics)
+      components
+    end
+
+    def get_interface_status
+      return {} unless @appliance&.respond_to?(:interfaces)
+      @appliance.interfaces.transform_values { |iface| { status: 'active' } }
+    end
+
+    def get_security_status
+      status = {}
+      
+      if @appliance&.respond_to?(:firewall)
+        fw_stats = @appliance.firewall.firewall_stats
+        status[:firewall] = {
+          enabled: fw_stats[:enabled],
+          rules: fw_stats[:total_rules],
+          blocked: fw_stats[:packets_blocked]
+        }
+      end
+      
+      status
+    end
+
+    def get_metrics_summary
+      return {} unless @appliance&.respond_to?(:metrics)
+      @appliance.metrics.metrics_summary
+    end
+
+    def display_status(status, verbose)
+      puts "AetherPacket Appliance Status"
+      puts "=" * 30
+      puts "Running: #{status[:running] ? 'Yes' : 'No'}"
+      
+      if status[:components]
+        puts "\nComponents:"
+        status[:components].each do |name, available|
+          puts "  #{name}: #{available ? 'Available' : 'Not Available'}"
+        end
+      end
+      
+      if verbose && status[:security]
+        puts "\nSecurity:"
+        status[:security].each do |component, stats|
+          puts "  #{component}: #{stats}"
+        end
+      end
+    end
+
+    def display_firewall_rules(rules)
+      puts "Firewall Rules"
+      puts "=" * 20
+      rules.each_with_index do |rule, index|
+        puts "#{index + 1}. #{rule[:action]} #{rule[:source_ip] || 'any'} -> #{rule[:destination_ip] || 'any'}"
+      end
+    end
+
+    def display_firewall_status(stats)
+      puts "Firewall Status"
+      puts "=" * 20
+      puts "Enabled: #{stats[:enabled]}"
+      puts "Total Rules: #{stats[:total_rules]}"
+      puts "Packets Processed: #{stats[:packets_processed]}"
+      puts "Packets Blocked: #{stats[:packets_blocked]}"
+    end
+
+    def show_realtime_metrics(metrics, window)
+      puts "Real-time Metrics (#{window}s window)"
+      puts "=" * 30
+      
+      loop do
+        summary = metrics.metrics_summary
+        system('clear')
+        
+        puts "Network Metrics - #{Time.now}"
+        puts "-" * 30
+        summary.each do |name, stats|
+          rate = stats[:rate_per_second] || 0
+          puts "%-25s: %8.2f/s" % [name, rate]
+        end
+        
+        sleep(1)
+      end
+    rescue Interrupt
+      puts "\nExiting real-time view..."
+    end
+
+    def show_top_metrics(metrics)
+      puts "Top Active Metrics"
+      puts "=" * 20
+      
+      summary = metrics.metrics_summary
+      top_metrics = summary.select { |_, stats| (stats[:rate_per_second] || 0) > 0 }
+                          .sort_by { |_, stats| -(stats[:rate_per_second] || 0) }
+                          .first(10)
+      
+      top_metrics.each do |name, stats|
+        puts "%-25s: %8.2f/s" % [name, stats[:rate_per_second]]
+      end
+    end
+
+    def show_metrics_summary(metrics)
+      puts "Metrics Summary"
+      puts "=" * 20
+      
+      summary = metrics.metrics_summary
+      summary.each do |name, stats|
+        puts "#{name}:"
+        puts "  Current: #{stats[:latest] || 0}"
+        puts "  Rate: #{stats[:rate_per_second] || 0}/s"
+        puts "  Count: #{stats[:count] || 0}"
+        puts
+      end
+    end
+
+    def generate_sample_config
+      sample_config = {
+        'interfaces' => ['eth0'],
+        'firewall' => {
+          'enabled' => true,
+          'default_action' => 'drop'
+        },
+        'nat' => {
+          'enabled' => true,
+          'internal_network' => '192.168.1.0/24'
+        },
+        'dashboard' => {
+          'enabled' => true,
+          'port' => 8080,
+          'host' => '0.0.0.0'
+        }
+      }
+      
+      puts "Sample Configuration:"
+      puts YAML.dump(sample_config)
+    end
+
+    def daemonize
+      Process.daemon(true, true)
+    end
+
+    def start_dashboard(port)
+      puts "Dashboard starting on port #{port}..."
+      # Would start dashboard server
+    end
+
+    def stop_dashboard
+      puts "Dashboard stopped."
+    end
+
+    def show_dashboard_url
+      puts "Dashboard URL: http://localhost:8080/dashboard"
+    end
+
+    def show_dashboard_status
+      puts "Dashboard Status: Not implemented"
+    end
+
+    def run_ping_test(host)
+      puts "Testing connectivity to #{host}..."
+      # Would implement ping test
+    end
+
+    def run_speed_test
+      puts "Running network speed test..."
+      # Would implement speed test
+    end
+
+    def run_packet_capture(count)
+      puts "Capturing #{count} packets..."
+      # Would implement packet capture
+    end
+
+    def run_basic_tests
+      puts "Running basic network tests..."
+      # Would implement basic tests
+    end
+
+    def show_security_status
+      puts "Security Status: Not implemented"
+    end
+
+    def show_security_alerts
+      puts "Recent Security Alerts: Not implemented"
+    end
+
+    def show_blocked_entities
+      puts "Blocked Entities: Not implemented"
+    end
+
+    def show_security_overview
+      puts "Security Overview: Not implemented"
+    end
+  end
+end
+
+# Run CLI if this file is executed directly
+if __FILE__ == $0
+  AetherPacket::AetherPacketCLI.new.run
+end
