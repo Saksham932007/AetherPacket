@@ -34,3 +34,4 @@ end
 
 # Autoload core components
 require_relative "aether_packet/version"
+require_relative "aether_packet/network_interface"
