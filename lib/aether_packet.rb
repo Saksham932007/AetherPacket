@@ -1,0 +1,36 @@
+# frozen_string_literal: true
+
+# AetherPacket - Enterprise-grade userspace network appliance
+# Built for raw socket performance and minimal allocations
+module AetherPacket
+  VERSION = "0.1.0"
+  
+  # Base error class for all AetherPacket exceptions
+  class Error < StandardError
+    attr_reader :context
+
+    def initialize(message = nil, context: {})
+      super(message)
+      @context = context
+    end
+  end
+
+  # Network layer errors
+  class NetworkError < Error; end
+  class InterfaceError < NetworkError; end
+  class SocketError < NetworkError; end
+  class PacketError < NetworkError; end
+  
+  # Protocol layer errors  
+  class ProtocolError < Error; end
+  class ChecksumError < ProtocolError; end
+  class MalformedPacketError < ProtocolError; end
+  
+  # System layer errors
+  class SystemError < Error; end
+  class PermissionError < SystemError; end
+  class ResourceError < SystemError; end
+end
+
+# Autoload core components
+require_relative "aether_packet/version"
